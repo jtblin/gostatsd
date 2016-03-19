@@ -5,14 +5,17 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/jtblin/gostatsd/cloudprovider"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/jtblin/gostatsd/types"
+	"github.com/matishsiao/go_reuseport"
 )
 
 // DefaultMetricsAddr is the default address on which a MetricReceiver will listen
@@ -73,17 +76,24 @@ func (mr *MetricReceiver) ListenAndReceive() error {
 	if addr == "" {
 		addr = defaultMetricsAddr
 	}
-	c, err := net.ListenPacket("udp", addr)
-	if err != nil {
-		return err
-	}
+	//c, err := net.ListenPacket("udp", addr)
+	//if err != nil {
+	//	return err
+	//}
 
 	mq := make(messageQueue, maxQueueSize)
 	for i := 0; i < mr.MaxMessengers; i++ {
 		go mq.dequeue(mr)
 	}
 	for i := 0; i < mr.MaxReaders; i++ {
-		go mr.receive(c, mq)
+		go func() {
+			c, fd, err := reuseport.NewReusableUDPPortConn("udp", addr)
+			if err != nil {
+				log.Panic(err)
+			}
+			mr.receive2(c, fd, mq)
+			//mr.receive(c, mq)
+		}()
 	}
 	return nil
 }
@@ -127,6 +137,105 @@ func (mr *MetricReceiver) receive(c net.PacketConn, mq messageQueue) {
 		buf = buf[nbytes:]
 		runtime.Gosched()
 	}
+}
+
+func (mr *MetricReceiver) receive2(c net.PacketConn, fd int, mq messageQueue) error {
+	defer c.Close()
+
+	var buf []byte
+	for {
+		if len(buf) < packetSizeUDP {
+			buf = make([]byte, packetBufSize, packetBufSize)
+		}
+
+		nbytes, addr, err := readFrom(c, fd, buf)
+		if err != nil {
+			log.Printf("Error %s", err)
+			continue
+		}
+		msg := buf[:nbytes]
+		mr.increment("packets_received", 1)
+		mq.enqueue(message{addr, msg}, mr)
+		buf = buf[nbytes:]
+		runtime.Gosched()
+	}
+}
+
+//func runtime_pollReset(ctx uintptr, mode int) int
+
+func readFrom(c net.PacketConn, fd int, p []byte) (n int, addr net.Addr, err error) {
+	log.Infof("fd: %d", fd)
+	// TODO: review that
+	if c != nil && fd == 0 {
+		return 0, nil, syscall.EINVAL
+	}
+	// TODO: prepareRead
+	//runtime_pollReset(, "r")
+	//if err := fd.pd.PrepareRead(); err != nil {
+	//	return 0, nil, err
+	//}
+	var sa syscall.Sockaddr
+	for {
+		n, sa, err = syscall.Recvfrom(fd, p, 0)
+		if err != nil {
+			n = 0
+			if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK || err == syscall.EINTR {
+				continue
+			}
+			//if err == syscall.EINTR {
+			//	log.Infof("syscall.EINTR %v", syscall.EINTR)
+			//	continue
+			//}
+			if err == syscall.EAGAIN {
+				log.Infof("syscall.EAGAIN %v", syscall.EAGAIN)
+				// TODO: WaitRead()
+				//if err = fd.pd.WaitRead(); err == nil {
+				//	continue
+				//}
+			}
+			panic(err)
+		}
+		//err = fd.eofError(n, err)
+		break
+	}
+	if _, ok := err.(syscall.Errno); ok {
+		err = os.NewSyscallError("recvfrom", err)
+	}
+	switch sa := sa.(type) {
+	case *syscall.SockaddrInet4:
+		addr = &net.UDPAddr{IP: sa.Addr[0:], Port: sa.Port}
+	case *syscall.SockaddrInet6:
+		addr = &net.UDPAddr{IP: sa.Addr[0:], Port: sa.Port, Zone: zoneToString(int(sa.ZoneId))}
+	}
+	return
+}
+
+func zoneToString(zone int) string {
+	if zone == 0 {
+		return ""
+	}
+	if ifi, err := net.InterfaceByIndex(zone); err == nil {
+		return ifi.Name
+	}
+	return uitoa(uint(zone))
+}
+
+// Convert unsigned integer to decimal string.
+func uitoa(val uint) string {
+	if val == 0 { // avoid string allocation
+		return "0"
+	}
+	var buf [20]byte // big enough for 64bit value base 10
+	i := len(buf) - 1
+	for val >= 10 {
+		q := val / 10
+		buf[i] = byte('0' + val - q*10)
+		i--
+		val = q
+	}
+	// val < 10
+	buf[i] = byte('0' + val)
+	return string(buf[i:])
 }
 
 // handleMessage handles the contents of a datagram and call r.Handler.HandleMetric()
