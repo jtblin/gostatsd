@@ -18,17 +18,20 @@ setup:
 	GO15VENDOREXPERIMENT=1 glide install
 
 build: *.go fmt
-	go build -o build/bin/$(ARCH)/$(BINARY_NAME) $(GOBUILD_VERSION_ARGS) github.com/jtblin/$(BINARY_NAME)
+	GO15VENDOREXPERIMENT=1 go build -o build/bin/$(ARCH)/$(BINARY_NAME) $(GOBUILD_VERSION_ARGS) github.com/jtblin/$(BINARY_NAME)
+
+race: *.go fmt
+	GO15VENDOREXPERIMENT=1 go build -race -o build/bin/$(ARCH)/$(BINARY_NAME) $(GOBUILD_VERSION_ARGS) github.com/jtblin/$(BINARY_NAME)
+
+build-ci:
+	GO15VENDOREXPERIMENT=1 go build -race $(GOBUILD_VERSION_ARGS) github.com/jtblin/$(BINARY_NAME)
 
 fmt:
 	gofmt -w=true -s $(shell find . -type f -name '*.go' -not -path "./vendor/*")
 	goimports -w=true -d $(shell find . -type f -name '*.go' -not -path "./vendor/*")
 
 test:
-	GO15VENDOREXPERIMENT=1 go test $(shell GO15VENDOREXPERIMENT=1 go list ./... | grep -v /vendor/)
-
-race:
-	GO15VENDOREXPERIMENT=1 go build -race $(shell GO15VENDOREXPERIMENT=1 go list ./... | grep -v /vendor/)
+	GO15VENDOREXPERIMENT=1 go test -race $(shell GO15VENDOREXPERIMENT=1 go list ./... | grep -v /vendor/)
 
 bench:
 	GO15VENDOREXPERIMENT=1 go test -bench=. $(shell GO15VENDOREXPERIMENT=1 go list ./... | grep -v /vendor/)

@@ -11,6 +11,6 @@ install:
 
 script:
   - make test
-  - make race
+  - make build-ci
   - make check || true
   - make coveralls

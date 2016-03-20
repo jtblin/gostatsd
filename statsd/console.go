@@ -5,6 +5,8 @@ import (
 	"net"
 
 	"github.com/kisielk/cmd"
+	"golang.org/x/net/context"
+	log "github.com/Sirupsen/logrus"
 )
 
 // DefaultConsoleAddr is the default address on which a ConsoleServer will listen
@@ -18,7 +20,7 @@ type ConsoleServer struct {
 }
 
 // ListenAndServe listens on the ConsoleServer's TCP network address and then calls Serve
-func (s *ConsoleServer) ListenAndServe() error {
+func (s *ConsoleServer) ListenAndServe(ctx context.Context) (resErr error) {
 	addr := s.Addr
 	if addr == "" {
 		addr = DefaultConsoleAddr
@@ -27,17 +29,27 @@ func (s *ConsoleServer) ListenAndServe() error {
 	if err != nil {
 		return err
 	}
-	return s.Serve(l)
+	defer func() {
+		if err := l.Close(); err != nil {
+			if resErr == nil {
+				resErr = err
+			} else {
+				log.Warnf("Error closing socket %v: %v", l, err)
+			}
+		}
+	}()
+	return s.Serve(ctx, l)
 }
 
 // Serve accepts incoming connections on the listener and serves them a console interface to
 // the MetricAggregator
-func (s *ConsoleServer) Serve(l net.Listener) error {
-	defer l.Close()
+func (s *ConsoleServer) Serve(ctx context.Context, l net.Listener) error {
 	for {
 		c, err := l.Accept()
 		if err != nil {
-			return err
+			// TODO check if the socket was closed
+			log.Warnf("Error accepting connection: %v", err)
+			continue
 		}
 		console := consoleConn{c, s}
 		go console.serve()

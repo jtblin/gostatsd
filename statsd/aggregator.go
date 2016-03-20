@@ -13,6 +13,7 @@ import (
 	"github.com/jtblin/gostatsd/types"
 
 	log "github.com/Sirupsen/logrus"
+	"golang.org/x/net/context"
 )
 
 // metricAggregatorStats is a bookkeeping structure for statistics about a MetricAggregator
@@ -358,7 +359,7 @@ func (a *MetricAggregator) processQueue() {
 
 // Aggregate starts the MetricAggregator so it begins consuming metrics from MetricChan
 // and flushing them periodically via its Sender
-func (a *MetricAggregator) Aggregate() {
+func (a *MetricAggregator) Aggregate(ctx context.Context) {
 	flushChan := make(chan error)
 	flushTimer := time.NewTimer(a.FlushInterval)
 
