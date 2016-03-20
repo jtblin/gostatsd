@@ -12,20 +12,16 @@ import (
 	_ "github.com/jtblin/gostatsd/cloudprovider/providers" // import cloud providers for initialisation
 	"github.com/jtblin/gostatsd/types"
 
-	log "github.com/Sirupsen/logrus"
-	"github.com/spf13/pflag"
-	"github.com/spf13/viper"
+	"golang.org/x/net/context"
 )
 
 // Server encapsulates all of the parameters necessary for starting up
-// the statsd server. These can either be set via command line or directly.
+// the statsd server.
 type Server struct {
 	aggregator       *MetricAggregator
 	Backends         []string
-	ConfigPath       string
 	ConsoleAddr      string
 	CloudProvider    string
-	CPUProfile       string
 	DefaultTags      []string
 	ExpiryInterval   time.Duration
 	FlushInterval    time.Duration
@@ -35,20 +31,12 @@ type Server struct {
 	MetricsAddr      string
 	Namespace        string
 	PercentThreshold []string
-	Verbose          bool
-	Version          bool
 	WebConsoleAddr   string
 }
 
-var server *Server
-
-// NewServer will create a new Server with default values if none exists
-// otherwise it will return the singleton.
+// NewServer will create a new Server with the default configuration.
 func NewServer() *Server {
-	if server != nil {
-		return server
-	}
-	server = &Server{
+	return &Server{
 		Backends:         []string{"graphite"},
 		ConsoleAddr:      ":8126",
 		ExpiryInterval:   5 * time.Minute,
@@ -60,46 +48,12 @@ func NewServer() *Server {
 		PercentThreshold: []string{"90"},
 		WebConsoleAddr:   ":8181",
 	}
-	return server
 }
 
-// AddFlags adds flags for a specific DockerAuthServer to the specified FlagSet
-func (s *Server) AddFlags(fs *pflag.FlagSet) {
-	fs.StringSliceVar(&s.Backends, "backends", s.Backends, "Comma-separated list of backends")
-	fs.StringVar(&s.ConfigPath, "config-path", s.ConfigPath, "Path to the configuration file")
-	fs.StringVar(&s.ConsoleAddr, "console-addr", s.ConsoleAddr, "If set, use as the address of the telnet-based console")
-	fs.StringVar(&s.CloudProvider, "cloud-provider", s.CloudProvider, "If set, use the cloud provider to retrieve metadata about the sender")
-	fs.StringVar(&s.CPUProfile, "cpu-profile", s.CPUProfile, "Use profiler and write results to this file")
-	fs.StringSliceVar(&s.DefaultTags, "default-tags", s.DefaultTags, "Default tags to add to the metrics")
-	fs.DurationVar(&s.ExpiryInterval, "expiry-interval", s.ExpiryInterval, "After how long do we expire metrics (0 to disable)")
-	fs.DurationVar(&s.FlushInterval, "flush-interval", s.FlushInterval, "How often to flush metrics to the backends")
-	fs.IntVar(&s.MaxReaders, "max-readers", s.MaxReaders, "Maximum number of socket readers")
-	fs.IntVar(&s.MaxMessengers, "max-messengers", s.MaxMessengers, "Maximum number of workers to process messages")
-	fs.IntVar(&s.MaxWorkers, "max-workers", s.MaxWorkers, "Maximum number of workers to process metrics")
-	fs.StringVar(&s.MetricsAddr, "metrics-addr", s.MetricsAddr, "Address on which to listen for metrics")
-	fs.StringVar(&s.Namespace, "namespace", s.Namespace, "Namespace all metrics")
-	fs.StringSliceVar(&s.PercentThreshold, "percent-threshold", s.PercentThreshold, "Comma-separated list of percentiles")
-	fs.BoolVar(&s.Verbose, "verbose", false, "Verbose")
-	fs.BoolVar(&s.Version, "version", false, "Print the version and exit")
-	fs.StringVar(&s.WebConsoleAddr, "web-addr", s.WebConsoleAddr, "If set, use as the address of the web-based console")
-}
-
-// Run runs the specified StatsdServer.
-func (s *Server) Run() error {
-	if s.Verbose {
-		log.SetLevel(log.DebugLevel)
-	}
-
-	if s.ConfigPath != "" {
-		viper.SetConfigFile(s.ConfigPath)
-		err := viper.ReadInConfig()
-		if err != nil {
-			return err
-		}
-	}
-
+// Run runs the server until context signals done.
+func (s *Server) Run(ctx context.Context) error {
 	// Start the metric aggregator
-	var backends []backend.MetricSender
+	backends := make([]backend.MetricSender, 0, len(s.Backends))
 	for _, backendName := range s.Backends {
 		b, err := backend.InitBackend(backendName)
 		if err != nil {
@@ -142,8 +96,11 @@ func (s *Server) Run() error {
 		go console.ListenAndServe()
 	}
 
-	// Listen forever
-	select {}
+	// Listen until done
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func internalStatName(name string) string {
