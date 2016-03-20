@@ -71,8 +71,11 @@ func (s *Server) Run(ctx context.Context) error {
 		percentThresholds = append(percentThresholds, pt)
 	}
 
+	internalCtx, internalCancel := context.WithCancel(ctx)
+	defer internalCancel()
+
 	aggregator := NewMetricAggregator(backends, percentThresholds, s.FlushInterval, s.ExpiryInterval, s.MaxWorkers, s.DefaultTags)
-	go aggregator.Aggregate()
+	go aggregator.Aggregate(internalCtx)
 	s.aggregator = aggregator
 
 	// Start the metric receiver
@@ -89,7 +92,7 @@ func (s *Server) Run(ctx context.Context) error {
 	// Start the console(s)
 	if s.ConsoleAddr != "" {
 		console := ConsoleServer{s.ConsoleAddr, aggregator}
-		go console.ListenAndServe()
+		go console.ListenAndServe(internalCtx)
 	}
 	if s.WebConsoleAddr != "" {
 		console := WebConsoleServer{s.WebConsoleAddr, aggregator}
