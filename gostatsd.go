@@ -74,10 +74,10 @@ func main() {
 
 	log.Info("Starting server")
 	s := statsd.Server{
-		Backends:         v.GetStringSlice(statsd.ParamBackends),
+		Backends:         toSlice(v.GetString(statsd.ParamBackends)),
 		ConsoleAddr:      v.GetString(statsd.ParamConsoleAddr),
 		CloudProvider:    v.GetString(statsd.ParamCloudProvider),
-		DefaultTags:      v.GetStringSlice(statsd.ParamDefaultTags),
+		DefaultTags:      toSlice(v.GetString(statsd.ParamDefaultTags)),
 		ExpiryInterval:   v.GetDuration(statsd.ParamExpiryInterval),
 		FlushInterval:    v.GetDuration(statsd.ParamFlushInterval),
 		MaxReaders:       v.GetInt(statsd.ParamMaxReaders),
@@ -85,7 +85,7 @@ func main() {
 		MaxMessengers:    v.GetInt(statsd.ParamMaxMessengers),
 		MetricsAddr:      v.GetString(statsd.ParamMetricsAddr),
 		Namespace:        v.GetString(statsd.ParamNamespace),
-		PercentThreshold: v.GetStringSlice(statsd.ParamPercentThreshold),
+		PercentThreshold: toSlice(v.GetString(statsd.ParamPercentThreshold)),
 		WebConsoleAddr:   v.GetString(statsd.ParamWebAddr),
 		Viper:            v,
 	}
@@ -93,6 +93,11 @@ func main() {
 		exitCode = 1
 		log.Errorf("%v", err)
 	}
+}
+
+func toSlice(s string) []string {
+	//TODO Remove workaround when https://github.com/spf13/viper/issues/112 is fixed
+	return strings.Split(s, ",")
 }
 
 // cancelOnInterrupt calls f when os.Interrupt or SIGTERM is received

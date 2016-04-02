@@ -12,6 +12,8 @@ import (
 	_ "github.com/jtblin/gostatsd/cloudprovider/providers" // import cloud providers for initialisation
 	"github.com/jtblin/gostatsd/types"
 
+	"strings"
+
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"golang.org/x/net/context"
@@ -22,6 +24,7 @@ var DefaultMaxReaders = runtime.NumCPU()
 var DefaultMaxMessengers = runtime.NumCPU() * 8
 var DefaultMaxWorkers = runtime.NumCPU() * 8 * 8
 var DefaultPercentThreshold = []string{"90"}
+var DefaultTags = []string{""}
 
 const (
 	DefaultExpiryInterval = 5 * time.Minute
@@ -70,6 +73,7 @@ func NewServer() *Server {
 	return &Server{
 		Backends:         DefaultBackends,
 		ConsoleAddr:      DefaultConsoleAddr,
+		DefaultTags:      DefaultTags,
 		ExpiryInterval:   DefaultExpiryInterval,
 		FlushInterval:    DefaultFlushInterval,
 		MaxReaders:       DefaultMaxReaders,
@@ -84,10 +88,8 @@ func NewServer() *Server {
 
 // AddFlags adds flags to the specified FlagSet
 func AddFlags(fs *pflag.FlagSet) {
-	fs.StringSlice(ParamBackends, DefaultBackends, "Comma-separated list of backends")
 	fs.String(ParamConsoleAddr, DefaultConsoleAddr, "If set, use as the address of the telnet-based console")
 	fs.String(ParamCloudProvider, "", "If set, use the cloud provider to retrieve metadata about the sender")
-	fs.StringSlice(ParamDefaultTags, nil, "Default tags to add to the metrics")
 	fs.Duration(ParamExpiryInterval, DefaultExpiryInterval, "After how long do we expire metrics (0 to disable)")
 	fs.Duration(ParamFlushInterval, DefaultFlushInterval, "How often to flush metrics to the backends")
 	fs.Int(ParamMaxReaders, DefaultMaxReaders, "Maximum number of socket readers")
@@ -95,8 +97,11 @@ func AddFlags(fs *pflag.FlagSet) {
 	fs.Int(ParamMaxWorkers, DefaultMaxWorkers, "Maximum number of workers to process metrics")
 	fs.String(ParamMetricsAddr, DefaultMetricsAddr, "Address on which to listen for metrics")
 	fs.String(ParamNamespace, "", "Namespace all metrics")
-	fs.StringSlice(ParamPercentThreshold, DefaultPercentThreshold, "Comma-separated list of percentiles")
 	fs.String(ParamWebAddr, DefaultWebConsoleAddr, "If set, use as the address of the web-based console")
+	//TODO Remove workaround when https://github.com/spf13/viper/issues/112 is fixed
+	fs.String(ParamBackends, strings.Join(DefaultBackends, ","), "Comma-separated list of backends")
+	fs.String(ParamDefaultTags, strings.Join(DefaultTags, ","), "Comma-separated list of tags to add to all metrics")
+	fs.String(ParamPercentThreshold, strings.Join(DefaultPercentThreshold, ","), "Comma-separated list of percentiles")
 }
 
 // Run runs the server until context signals done.
