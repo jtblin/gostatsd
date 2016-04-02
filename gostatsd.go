@@ -109,6 +109,12 @@ func cancelOnInterrupt(ctx context.Context, f context.CancelFunc) {
 }
 
 func setupConfiguration() (error, *viper.Viper, bool) {
+	v := viper.New()
+	v.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
+	v.SetEnvPrefix(EnvPrefix)
+	v.SetTypeByDefaultValue(true)
+	v.AutomaticEnv()
+
 	var version bool
 
 	cmd := pflag.NewFlagSet(os.Args[0], pflag.ContinueOnError)
@@ -121,19 +127,17 @@ func setupConfiguration() (error, *viper.Viper, bool) {
 
 	statsd.AddFlags(cmd)
 
+	cmd.VisitAll(func(flag *pflag.Flag) {
+		v.BindPFlag(flag.Name, flag)
+	})
+
+	setupLogger(v) // setup logger from environment vars and flag defaults
+
 	if err := cmd.Parse(os.Args[1:]); err != nil {
 		return err, nil, false
 	}
 
-	v := viper.New()
-	v.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
-	v.SetEnvPrefix(EnvPrefix)
-	v.SetTypeByDefaultValue(true)
-	v.AutomaticEnv()
-
-	cmd.VisitAll(func(flag *pflag.Flag) {
-		v.BindPFlag(flag.Name, flag)
-	})
+	setupLogger(v) // update logger with config from command line flags
 
 	configPath := v.GetString(ParamConfigPath)
 	if configPath != "" {
@@ -143,12 +147,16 @@ func setupConfiguration() (error, *viper.Viper, bool) {
 		}
 	}
 
+	setupLogger(v) // finally update logger with vars from config
+
+	return nil, v, version
+}
+
+func setupLogger(v *viper.Viper) {
 	if v.GetBool(ParamVerbose) {
 		log.SetLevel(log.DebugLevel)
 	}
 	if v.GetBool(ParamJson) {
 		log.SetFormatter(&log.JSONFormatter{})
 	}
-
-	return nil, v, version
 }
