@@ -48,11 +48,11 @@ func main() {
 		return
 	}
 	exitCode := 0
-	defer func(e *int) {
-		if *e != 0 {
-			os.Exit(*e)
+	defer func() {
+		if exitCode != 0 {
+			os.Exit(exitCode)
 		}
-	}(&exitCode)
+	}()
 	CPUProfile := v.GetString(ParamCPUProfile)
 	if CPUProfile != "" {
 		f, err := os.Create(CPUProfile)
