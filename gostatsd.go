@@ -17,17 +17,17 @@ import (
 )
 
 var (
-	// BuildDate is the date when the binary was built
+	// BuildDate is the date when the binary was built.
 	BuildDate string
-	// GitCommit is the commit hash when the binary was built
+	// GitCommit is the commit hash when the binary was built.
 	GitCommit string
-	// Version is the version of the binary
+	// Version is the version of the binary.
 	Version string
 )
 
 const (
 	// ParamVerbose enables verbose logging.
-	ParamVerbose    = "verbose"
+	ParamVerbose = "verbose"
 	// ParamCPUProfile enables use of profiler and write results to this file.
 	ParamCPUProfile = "cpu-profile"
 	// ParamJSON makes logger log in JSON format.
@@ -35,7 +35,7 @@ const (
 	// ParamConfigPath provides file with configuration.
 	ParamConfigPath = "config-path"
 	// ParamVersion makes program output its version.
-	ParamVersion    = "version"
+	ParamVersion = "version"
 )
 
 // EnvPrefix is the prefix of the inspected environment variables.
@@ -106,7 +106,7 @@ func toSlice(s string) []string {
 	return strings.Split(s, ",")
 }
 
-// cancelOnInterrupt calls f when os.Interrupt or SIGTERM is received
+// cancelOnInterrupt calls f when os.Interrupt or SIGTERM is received.
 func cancelOnInterrupt(ctx context.Context, f context.CancelFunc) {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
