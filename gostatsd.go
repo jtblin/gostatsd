@@ -26,13 +26,19 @@ var (
 )
 
 const (
+	// ParamVerbose enables verbose logging.
 	ParamVerbose    = "verbose"
+	// ParamCPUProfile enables use of profiler and write results to this file.
 	ParamCPUProfile = "cpu-profile"
-	ParamJson       = "json"
+	// ParamJSON makes logger log in JSON format.
+	ParamJSON = "json"
+	// ParamConfigPath provides file with configuration.
 	ParamConfigPath = "config-path"
+	// ParamVersion makes program output its version.
 	ParamVersion    = "version"
 )
 
+// EnvPrefix is the prefix of the inspected environment variables.
 const EnvPrefix = "GSD" //Go Stats D
 
 func main() {
@@ -91,7 +97,7 @@ func main() {
 	}
 	if err := s.Run(ctx); err != nil && err != context.Canceled {
 		exitCode = 1
-		log.Errorf("%v", err)
+		log.Errorf("Server error: %v", err)
 	}
 }
 
@@ -126,7 +132,7 @@ func setupConfiguration() (error, *viper.Viper, bool) {
 
 	cmd.BoolVar(&version, ParamVersion, false, "Print the version and exit")
 	cmd.Bool(ParamVerbose, false, "Verbose")
-	cmd.Bool(ParamJson, false, "Log in JSON format")
+	cmd.Bool(ParamJSON, false, "Log in JSON format")
 	cmd.String(ParamCPUProfile, "", "Use profiler and write results to this file")
 	cmd.String(ParamConfigPath, "", "Path to the configuration file")
 
@@ -161,7 +167,7 @@ func setupLogger(v *viper.Viper) {
 	if v.GetBool(ParamVerbose) {
 		log.SetLevel(log.DebugLevel)
 	}
-	if v.GetBool(ParamJson) {
+	if v.GetBool(ParamJSON) {
 		log.SetFormatter(&log.JSONFormatter{})
 	}
 }
