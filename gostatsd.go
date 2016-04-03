@@ -42,35 +42,40 @@ const (
 const EnvPrefix = "GSD" //Go Stats D
 
 func main() {
-	err, v, version := setupConfiguration()
+	v, version, err := setupConfiguration()
 	if err != nil {
 		if err == pflag.ErrHelp {
 			return
 		}
-		log.Fatalf("Error while parsing configuration: %v\n", err)
+		log.Fatalf("Error while parsing configuration: %v", err)
 	}
 	if version {
 		fmt.Printf("Version: %s - Commit: %s - Date: %s\n", Version, GitCommit, BuildDate)
 		return
 	}
-	exitCode := 0
+	var exitErr error
 	defer func() {
-		if exitCode != 0 {
-			os.Exit(exitCode)
+		if exitErr != nil {
+			log.Fatalf("%v", exitErr)
 		}
 	}()
 	CPUProfile := v.GetString(ParamCPUProfile)
 	if CPUProfile != "" {
 		f, err := os.Create(CPUProfile)
 		if err != nil {
-			log.Fatalf("Failed to open profile file: %v", err)
+			augmentErr(&exitErr, fmt.Errorf("Failed to open profile file: %v", err))
+			return
 		}
 		defer func() {
 			if err := f.Close(); err != nil {
-				log.Errorf("Failed to close profile file: %v", err)
+				augmentErr(&exitErr, fmt.Errorf("Failed to close profile file: %v", err))
 			}
 		}()
-		pprof.StartCPUProfile(f)
+		err = pprof.StartCPUProfile(f)
+		if err != nil {
+			augmentErr(&exitErr, fmt.Errorf("Failed to start CPU profiler: %v", err))
+			return
+		}
 		defer pprof.StopCPUProfile()
 	}
 
@@ -96,8 +101,17 @@ func main() {
 		Viper:            v,
 	}
 	if err := s.Run(ctx); err != nil && err != context.Canceled {
-		exitCode = 1
-		log.Errorf("Server error: %v", err)
+		augmentErr(&exitErr, fmt.Errorf("Server error: %v", err))
+	}
+}
+
+// augmentErr updates exitErr to point to newErr if exitErr is nil, otherwise logs newErr.
+// The idea is to log all errors and fail the program with the first one.
+func augmentErr(exitErr *error, newErr error) {
+	if *exitErr == nil {
+		*exitErr = newErr
+	} else {
+		log.Errorf("%v", newErr)
 	}
 }
 
@@ -119,7 +133,7 @@ func cancelOnInterrupt(ctx context.Context, f context.CancelFunc) {
 	}()
 }
 
-func setupConfiguration() (error, *viper.Viper, bool) {
+func setupConfiguration() (*viper.Viper, bool, error) {
 	v := viper.New()
 	v.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 	v.SetEnvPrefix(EnvPrefix)
@@ -139,13 +153,15 @@ func setupConfiguration() (error, *viper.Viper, bool) {
 	statsd.AddFlags(cmd)
 
 	cmd.VisitAll(func(flag *pflag.Flag) {
-		v.BindPFlag(flag.Name, flag)
+		if err := v.BindPFlag(flag.Name, flag); err != nil {
+			panic(err) // Should never happen
+		}
 	})
 
 	setupLogger(v) // setup logger from environment vars and flag defaults
 
 	if err := cmd.Parse(os.Args[1:]); err != nil {
-		return err, nil, false
+		return nil, false, err
 	}
 
 	setupLogger(v) // update logger with config from command line flags
@@ -154,13 +170,13 @@ func setupConfiguration() (error, *viper.Viper, bool) {
 	if configPath != "" {
 		v.SetConfigFile(configPath)
 		if err := v.ReadInConfig(); err != nil {
-			return err, nil, false
+			return nil, false, err
 		}
 	}
 
 	setupLogger(v) // finally update logger with vars from config
 
-	return nil, v, version
+	return v, version, nil
 }
 
 func setupLogger(v *viper.Viper) {
