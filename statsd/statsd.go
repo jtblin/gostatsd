@@ -2,8 +2,11 @@ package statsd
 
 import (
 	"fmt"
+	"net"
 	"runtime"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/jtblin/gostatsd/backend"
@@ -12,8 +15,7 @@ import (
 	_ "github.com/jtblin/gostatsd/cloudprovider/providers" // import cloud providers for initialisation
 	"github.com/jtblin/gostatsd/types"
 
-	"strings"
-
+	log "github.com/Sirupsen/logrus"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"golang.org/x/net/context"
@@ -24,12 +26,6 @@ var DefaultBackends = []string{"graphite"}
 
 // DefaultMaxReaders is the default number of socket reading goroutines.
 var DefaultMaxReaders = runtime.NumCPU()
-
-// DefaultMaxMessengers is the default number of message processing goroutines.
-var DefaultMaxMessengers = runtime.NumCPU() * 8
-
-// DefaultMaxWorkers is the default number of goroutines that aggregate metrics.
-var DefaultMaxWorkers = runtime.NumCPU() * 8 * 8
 
 // DefaultPercentThreshold is the default list of applied percentiles.
 var DefaultPercentThreshold = []string{"90"}
@@ -61,10 +57,6 @@ const (
 	ParamFlushInterval = "flush-interval"
 	// ParamMaxReaders is the name of parameter with number of socket readers.
 	ParamMaxReaders = "max-readers"
-	// ParamMaxMessengers is the name of parameter with number of message processing goroutines.
-	ParamMaxMessengers = "max-messengers"
-	// ParamMaxWorkers is the name of parameter with number of goroutines that aggregate metrics.
-	ParamMaxWorkers = "max-workers"
 	// ParamMetricsAddr is the name of parameter with address on which to listen for metrics.
 	ParamMetricsAddr = "metrics-addr"
 	// ParamNamespace is the name of parameter with namespace for all metrics.
@@ -78,7 +70,6 @@ const (
 // Server encapsulates all of the parameters necessary for starting up
 // the statsd server. These can either be set via command line or directly.
 type Server struct {
-	aggregator       *MetricAggregator
 	Backends         []string
 	ConsoleAddr      string
 	CloudProvider    string
@@ -86,7 +77,6 @@ type Server struct {
 	ExpiryInterval   time.Duration
 	FlushInterval    time.Duration
 	MaxReaders       int
-	MaxWorkers       int
 	MaxMessengers    int
 	MetricsAddr      string
 	Namespace        string
@@ -104,8 +94,6 @@ func NewServer() *Server {
 		ExpiryInterval:   DefaultExpiryInterval,
 		FlushInterval:    DefaultFlushInterval,
 		MaxReaders:       DefaultMaxReaders,
-		MaxMessengers:    DefaultMaxMessengers,
-		MaxWorkers:       DefaultMaxWorkers,
 		MetricsAddr:      DefaultMetricsAddr,
 		PercentThreshold: DefaultPercentThreshold,
 		WebConsoleAddr:   DefaultWebConsoleAddr,
@@ -120,8 +108,6 @@ func AddFlags(fs *pflag.FlagSet) {
 	fs.Duration(ParamExpiryInterval, DefaultExpiryInterval, "After how long do we expire metrics (0 to disable)")
 	fs.Duration(ParamFlushInterval, DefaultFlushInterval, "How often to flush metrics to the backends")
 	fs.Int(ParamMaxReaders, DefaultMaxReaders, "Maximum number of socket readers")
-	fs.Int(ParamMaxMessengers, DefaultMaxMessengers, "Maximum number of workers to process messages")
-	fs.Int(ParamMaxWorkers, DefaultMaxWorkers, "Maximum number of workers to process metrics")
 	fs.String(ParamMetricsAddr, DefaultMetricsAddr, "Address on which to listen for metrics")
 	fs.String(ParamNamespace, "", "Namespace all metrics")
 	fs.String(ParamWebAddr, DefaultWebConsoleAddr, "If set, use as the address of the web-based console")
@@ -152,20 +138,51 @@ func (s *Server) Run(ctx context.Context) error {
 		percentThresholds = append(percentThresholds, pt)
 	}
 
-	aggregator := NewMetricAggregator(backends, percentThresholds, s.FlushInterval, s.ExpiryInterval, s.MaxWorkers, s.DefaultTags)
-	go aggregator.Aggregate()
-	s.aggregator = aggregator
+	aggregator := NewMetricAggregator(backends, percentThresholds, s.FlushInterval, s.ExpiryInterval, s.DefaultTags)
+	var wgAggr sync.WaitGroup
+	var wgReceiver sync.WaitGroup
+	wgAggr.Add(1)
+	go func() {
+		defer wgAggr.Done()
+		aggregator.Aggregate()
+	}()
+	defer func() {
+		wgReceiver.Wait()             // Wait for all receivers to finish
+		close(aggregator.MetricQueue) // Tell the aggregator to shutdown
+		wgAggr.Wait()                 // Wait for aggregator to shutdown
+	}()
 
 	// Start the metric receiver
-	f := func(metric *types.Metric) {
-		aggregator.MetricQueue <- metric
+	f := func(ctx context.Context, metric *types.Metric) {
+		select {
+		case aggregator.MetricQueue <- metric:
+		case <-ctx.Done():
+		}
 	}
 	cloud, err := cloudprovider.InitCloudProvider(s.CloudProvider, s.Viper)
 	if err != nil {
 		return err
 	}
-	receiver := NewMetricReceiver(s.MetricsAddr, s.Namespace, s.MaxReaders, s.MaxMessengers, s.DefaultTags, cloud, HandlerFunc(f))
-	go receiver.ListenAndReceive()
+
+	c, err := net.ListenPacket("udp", s.MetricsAddr)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		// This makes receivers error out and stop
+		if err := c.Close(); err != nil {
+			log.Warnf("Error closing socket: %v", err)
+		}
+	}()
+
+	receiver := NewMetricReceiver(s.Namespace, s.DefaultTags, cloud, HandlerFunc(f))
+	wgReceiver.Add(s.MaxReaders)
+	for r := 0; r < s.MaxReaders; r++ {
+		go func() {
+			defer wgReceiver.Done()
+			receiver.Receive(ctx, c)
+		}()
+	}
 
 	// Start the console(s)
 	if s.ConsoleAddr != "" {
