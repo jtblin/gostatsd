@@ -5,132 +5,83 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"runtime"
 	"strings"
 
 	"github.com/jtblin/gostatsd/cloudprovider"
 	"github.com/jtblin/gostatsd/types"
 
 	log "github.com/Sirupsen/logrus"
+	"golang.org/x/net/context"
 )
 
-// DefaultMetricsAddr is the default address on which a MetricReceiver will listen.
 const (
-	defaultMetricsAddr = ":8125"
-	maxQueueSize       = 100000      // arbitrary: testing shows it rarely goes above 2k
-	packetBufSize      = 1024 * 1024 // 1 MB
-	packetSizeUDP      = 1500
+	maxQueueSize  = 100000 // arbitrary: testing shows it rarely goes above 2k
+	packetSizeUDP = 1500
 )
 
 // Handler interface can be used to handle metrics for a MetricReceiver.
 type Handler interface {
-	HandleMetric(m *types.Metric)
+	HandleMetric(ctx context.Context, m *types.Metric)
 }
 
 // The HandlerFunc type is an adapter to allow the use of ordinary functions as metric handlers.
-type HandlerFunc func(*types.Metric)
+type HandlerFunc func(context.Context, *types.Metric)
 
 // HandleMetric calls f(m).
-func (f HandlerFunc) HandleMetric(m *types.Metric) {
-	f(m)
+func (f HandlerFunc) HandleMetric(ctx context.Context, m *types.Metric) {
+	f(ctx, m)
 }
 
 // MetricReceiver receives data on its listening port and converts lines in to Metrics.
 // For each types.Metric it calls r.Handler.HandleMetric()
 type MetricReceiver struct {
-	Addr          string                  // UDP address on which to listen for metrics
-	Cloud         cloudprovider.Interface // Cloud provider interface
-	Handler       Handler                 // handler to invoke
-	MaxReaders    int                     // Maximum number of workers
-	MaxMessengers int                     // Maximum number of workers
-	Namespace     string                  // Namespace to prefix all metrics
-	Tags          types.Tags              // Tags to add to all metrics
-}
-
-type message struct {
-	addr net.Addr
-	msg  []byte
+	Cloud     cloudprovider.Interface // Cloud provider interface
+	Handler   Handler                 // handler to invoke
+	Namespace string                  // Namespace to prefix all metrics
+	Tags      types.Tags              // Tags to add to all metrics
 }
 
 // NewMetricReceiver initialises a new MetricReceiver.
-func NewMetricReceiver(addr, ns string, maxReaders, maxMessengers int, tags []string, cloud cloudprovider.Interface, handler Handler) *MetricReceiver {
+func NewMetricReceiver(ns string, tags []string, cloud cloudprovider.Interface, handler Handler) *MetricReceiver {
 	return &MetricReceiver{
-		Addr:          addr,
-		Cloud:         cloud,
-		Handler:       handler,
-		MaxReaders:    maxReaders,
-		MaxMessengers: maxMessengers,
-		Namespace:     ns,
-		Tags:          tags,
+		Cloud:     cloud,
+		Handler:   handler,
+		Namespace: ns,
+		Tags:      tags,
 	}
-}
-
-// ListenAndReceive listens on the UDP network address of srv.Addr and then calls
-// Receive to handle the incoming datagrams. If Addr is blank then DefaultMetricsAddr is used.
-func (mr *MetricReceiver) ListenAndReceive() error {
-	addr := mr.Addr
-	if addr == "" {
-		addr = defaultMetricsAddr
-	}
-	c, err := net.ListenPacket("udp", addr)
-	if err != nil {
-		return err
-	}
-
-	mq := make(messageQueue, maxQueueSize)
-	for i := 0; i < mr.MaxMessengers; i++ {
-		go mq.dequeue(mr)
-	}
-	for i := 0; i < mr.MaxReaders; i++ {
-		go mr.receive(c, mq)
-	}
-	return nil
 }
 
 // increment allows counting server stats using default tags.
-func (mr *MetricReceiver) increment(name string, value int) {
-	mr.Handler.HandleMetric(types.NewMetric(internalStatName(name), float64(value), types.COUNTER, mr.Tags))
+func (mr *MetricReceiver) increment(ctx context.Context, name string, value int) {
+	mr.Handler.HandleMetric(ctx, types.NewMetric(internalStatName(name), float64(value), types.COUNTER, mr.Tags))
 }
 
-type messageQueue chan message
-
-func (mq messageQueue) enqueue(m message, mr *MetricReceiver) {
-	mq <- m
-}
-
-func (mq messageQueue) dequeue(mr *MetricReceiver) {
-	for m := range mq {
-		mr.handleMessage(m.addr, m.msg)
-		runtime.Gosched()
-	}
-}
-
-// receive accepts incoming datagrams on c and calls mr.handleMessage() for each message.
-func (mr *MetricReceiver) receive(c net.PacketConn, mq messageQueue) {
-	defer c.Close()
-
-	var buf []byte
+// Receive accepts incoming datagrams on c and calls mr.handleMessage() for each message.
+func (mr *MetricReceiver) Receive(ctx context.Context, c net.PacketConn) {
+	buf := make([]byte, packetSizeUDP)
 	for {
-		if len(buf) < packetSizeUDP {
-			buf = make([]byte, packetBufSize, packetBufSize)
-		}
-
+		// This will error out when the socket is closed.
 		nbytes, addr, err := c.ReadFrom(buf)
 		if err != nil {
-			log.Printf("Error %s", err)
+			if netErr, ok := err.(net.Error); ok && !netErr.Temporary() {
+				select {
+				case <-ctx.Done():
+				default:
+					log.Errorf("Non-temporary error reading from socket: %v", err)
+				}
+				return
+			}
+			log.Warnf("Error reading from socket: %v", err)
 			continue
 		}
-		msg := buf[:nbytes]
-		mr.increment("packets_received", 1)
-		mq.enqueue(message{addr, msg}, mr)
-		buf = buf[nbytes:]
-		runtime.Gosched()
+		mr.increment(ctx, "packets_received", 1)
+		mr.handleMessage(ctx, addr, buf[:nbytes])
 	}
 }
 
 // handleMessage handles the contents of a datagram and call r.Handler.HandleMetric()
 // for each line that successfully parses in to a types.Metric.
-func (mr *MetricReceiver) handleMessage(addr net.Addr, msg []byte) {
+func (mr *MetricReceiver) handleMessage(ctx context.Context, addr net.Addr, msg []byte) {
 	numMetrics := 0
 	var triedToGetTags bool
 	var additionalTags types.Tags
@@ -155,7 +106,7 @@ func (mr *MetricReceiver) handleMessage(addr net.Addr, msg []byte) {
 				// logging as debug to avoid spamming logs when a bad actor sends
 				// badly formatted messages
 				log.Debugf("Error parsing line %q from %s: %v", line, addr, err)
-				mr.increment("bad_lines_seen", 1)
+				mr.increment(ctx, "bad_lines_seen", 1)
 				continue
 			}
 			if !triedToGetTags {
@@ -166,13 +117,13 @@ func (mr *MetricReceiver) handleMessage(addr net.Addr, msg []byte) {
 				metric.Tags = append(metric.Tags, additionalTags...)
 				log.Debugf("Metric tags: %v", metric.Tags)
 			}
-			mr.Handler.HandleMetric(metric)
+			mr.Handler.HandleMetric(ctx, metric)
 			numMetrics++
 		}
 
 		if readerr == io.EOF {
 			// if was EOF, finished handling
-			mr.increment("metrics_received", numMetrics)
+			mr.increment(ctx, "metrics_received", numMetrics)
 			return
 		}
 	}
