@@ -133,11 +133,6 @@ func (fpc FakePacketConn) SetDeadline(t time.Time) error                      { 
 func (fpc FakePacketConn) SetReadDeadline(t time.Time) error                  { return nil }
 func (fpc FakePacketConn) SetWriteDeadline(t time.Time) error                 { return nil }
 
-func manageQueue(mq messageQueue) {
-	for range mq {
-	}
-}
-
 // Need to change MetricReceiver.receive to a finite loop to be able to run the benchmark
 //func BenchmarkReceive(b *testing.B) {
 //	mq := make(messageQueue, maxQueueSize)

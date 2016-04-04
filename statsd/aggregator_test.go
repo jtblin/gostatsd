@@ -26,7 +26,6 @@ func newFakeMetricAggregator() (backend.MetricSender, *MetricAggregator) {
 		[]float64{float64(90)},
 		time.Duration(10)*time.Second,
 		time.Duration(5)*time.Minute,
-		2,
 		[]string{},
 	)
 }
