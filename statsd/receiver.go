@@ -14,10 +14,7 @@ import (
 	"golang.org/x/net/context"
 )
 
-const (
-	maxQueueSize  = 100000 // arbitrary: testing shows it rarely goes above 2k
-	packetSizeUDP = 1500
-)
+const packetSizeUDP = 1500
 
 // Handler interface can be used to handle metrics for a MetricReceiver.
 type Handler interface {

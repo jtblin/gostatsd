@@ -92,6 +92,7 @@ func main() {
 		ExpiryInterval:   v.GetDuration(statsd.ParamExpiryInterval),
 		FlushInterval:    v.GetDuration(statsd.ParamFlushInterval),
 		MaxReaders:       v.GetInt(statsd.ParamMaxReaders),
+		MaxWorkers:       v.GetInt(statsd.ParamMaxWorkers),
 		MetricsAddr:      v.GetString(statsd.ParamMetricsAddr),
 		Namespace:        v.GetString(statsd.ParamNamespace),
 		PercentThreshold: toSlice(v.GetString(statsd.ParamPercentThreshold)),

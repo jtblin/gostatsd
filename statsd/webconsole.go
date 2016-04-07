@@ -97,8 +97,6 @@ func size(arr map[string]int64) string {
 }
 
 func (s *WebConsoleServer) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	s.Aggregator.Lock()
-	defer s.Aggregator.Unlock()
 	err := temp.Execute(w, s.Aggregator)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

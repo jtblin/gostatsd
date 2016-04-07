@@ -27,6 +27,9 @@ var DefaultBackends = []string{"graphite"}
 // DefaultMaxReaders is the default number of socket reading goroutines.
 var DefaultMaxReaders = runtime.NumCPU()
 
+// DefaultMaxWorkers is the default number of goroutines that aggregate metrics.
+var DefaultMaxWorkers = runtime.NumCPU()
+
 // DefaultPercentThreshold is the default list of applied percentiles.
 var DefaultPercentThreshold = []string{"90"}
 
@@ -40,6 +43,8 @@ const (
 	DefaultFlushInterval = 1 * time.Second
 	// DefaultMetricsAddr is the default address on which to listen for metrics.
 	DefaultMetricsAddr = ":8125"
+	// DefaultMaxQueueSize is the default maximum number of buffered metrics per worker.
+	DefaultMaxQueueSize = 10000 // arbitrary
 )
 
 const (
@@ -57,6 +62,10 @@ const (
 	ParamFlushInterval = "flush-interval"
 	// ParamMaxReaders is the name of parameter with number of socket readers.
 	ParamMaxReaders = "max-readers"
+	// ParamMaxWorkers is the name of parameter with number of goroutines that aggregate metrics.
+	ParamMaxWorkers = "max-workers"
+	// ParamMaxQueueSize is the name of parameter with maximum number of buffered metrics per worker.
+	ParamMaxQueueSize = "max-queue-size"
 	// ParamMetricsAddr is the name of parameter with address on which to listen for metrics.
 	ParamMetricsAddr = "metrics-addr"
 	// ParamNamespace is the name of parameter with namespace for all metrics.
@@ -77,6 +86,8 @@ type Server struct {
 	ExpiryInterval   time.Duration
 	FlushInterval    time.Duration
 	MaxReaders       int
+	MaxWorkers       int
+	MaxQueueSize     int
 	MaxMessengers    int
 	MetricsAddr      string
 	Namespace        string
@@ -94,6 +105,8 @@ func NewServer() *Server {
 		ExpiryInterval:   DefaultExpiryInterval,
 		FlushInterval:    DefaultFlushInterval,
 		MaxReaders:       DefaultMaxReaders,
+		MaxWorkers:       DefaultMaxWorkers,
+		MaxQueueSize:     DefaultMaxQueueSize,
 		MetricsAddr:      DefaultMetricsAddr,
 		PercentThreshold: DefaultPercentThreshold,
 		WebConsoleAddr:   DefaultWebConsoleAddr,
@@ -108,6 +121,8 @@ func AddFlags(fs *pflag.FlagSet) {
 	fs.Duration(ParamExpiryInterval, DefaultExpiryInterval, "After how long do we expire metrics (0 to disable)")
 	fs.Duration(ParamFlushInterval, DefaultFlushInterval, "How often to flush metrics to the backends")
 	fs.Int(ParamMaxReaders, DefaultMaxReaders, "Maximum number of socket readers")
+	fs.Int(ParamMaxWorkers, DefaultMaxWorkers, "Maximum number of workers to process metrics")
+	fs.Int(ParamMaxQueueSize, DefaultMaxQueueSize, "Maximum number of buffered metrics per worker")
 	fs.String(ParamMetricsAddr, DefaultMetricsAddr, "Address on which to listen for metrics")
 	fs.String(ParamNamespace, "", "Namespace all metrics")
 	fs.String(ParamWebAddr, DefaultWebConsoleAddr, "If set, use as the address of the web-based console")
@@ -138,32 +153,31 @@ func (s *Server) Run(ctx context.Context) error {
 		percentThresholds = append(percentThresholds, pt)
 	}
 
-	aggregator := NewMetricAggregator(backends, percentThresholds, s.FlushInterval, s.ExpiryInterval, s.DefaultTags)
-	var wgAggr sync.WaitGroup
-	var wgReceiver sync.WaitGroup
-	wgAggr.Add(1)
-	go func() {
-		defer wgAggr.Done()
-		aggregator.Aggregate()
-	}()
-	defer func() {
-		wgReceiver.Wait()             // Wait for all receivers to finish
-		close(aggregator.MetricQueue) // Tell the aggregator to shutdown
-		wgAggr.Wait()                 // Wait for aggregator to shutdown
-	}()
-
-	// Start the metric receiver
-	f := func(ctx context.Context, metric *types.Metric) {
-		select {
-		case aggregator.MetricQueue <- metric:
-		case <-ctx.Done():
-		}
-	}
 	cloud, err := cloudprovider.InitCloudProvider(s.CloudProvider, s.Viper)
 	if err != nil {
 		return err
 	}
 
+	factory := func() Aggregator {
+		return NewMetricAggregator(percentThresholds, s.FlushInterval, s.ExpiryInterval, s.DefaultTags)
+	}
+	dispatcher := NewDispatcher(s.MaxWorkers, s.MaxQueueSize, s.FlushInterval, AggregatorFactoryFunc(factory), backends)
+
+	var wgDispatcher sync.WaitGroup
+	defer wgDispatcher.Wait() // Wait for dispatcher to shutdown
+	ctxDisp, cancelDisp := context.WithCancel(context.Background()) // Separate context!
+	defer cancelDisp() // Tell the dispatcher to shutdown
+	wgDispatcher.Add(1)
+	go func() {
+		defer wgDispatcher.Done()
+		if err := dispatcher.Run(ctxDisp); err != nil && err != context.Canceled {
+			log.Panicf("Dispatcher unexpectedly quit: %v", err)
+		}
+	}()
+	var wgReceiver sync.WaitGroup
+	defer wgReceiver.Wait() // Wait for all receivers to finish
+
+	// Start the metric receiver
 	c, err := net.ListenPacket("udp", s.MetricsAddr)
 	if err != nil {
 		return err
@@ -175,7 +189,7 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}()
 
-	receiver := NewMetricReceiver(s.Namespace, s.DefaultTags, cloud, HandlerFunc(f))
+	receiver := NewMetricReceiver(s.Namespace, s.DefaultTags, cloud, HandlerFunc(dispatcher.DispatchMetric))
 	wgReceiver.Add(s.MaxReaders)
 	for r := 0; r < s.MaxReaders; r++ {
 		go func() {

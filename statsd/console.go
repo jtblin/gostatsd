@@ -60,8 +60,6 @@ func (c *consoleConn) serve() {
 			return "Commands: stats, counters, timers, gauges, delcounters, deltimers, delgauges, quit\n", nil
 		},
 		"stats": func(args []string) (string, error) {
-			c.server.Aggregator.Lock()
-			defer c.server.Aggregator.Unlock()
 			return fmt.Sprintf(
 				"Invalid messages received: %d\n"+
 					"Last message received: %s\n"+
@@ -73,23 +71,15 @@ func (c *consoleConn) serve() {
 				c.server.Aggregator.Stats.LastFlushError), nil
 		},
 		"counters": func(args []string) (string, error) {
-			c.server.Aggregator.Lock()
-			defer c.server.Aggregator.Unlock()
 			return fmt.Sprintln(c.server.Aggregator.Counters), nil
 		},
 		"timers": func(args []string) (string, error) {
-			c.server.Aggregator.Lock()
-			defer c.server.Aggregator.Unlock()
 			return fmt.Sprintln(c.server.Aggregator.Timers), nil
 		},
 		"gauges": func(args []string) (string, error) {
-			c.server.Aggregator.Lock()
-			defer c.server.Aggregator.Unlock()
 			return fmt.Sprintln(c.server.Aggregator.Gauges), nil
 		},
 		"sets": func(args []string) (string, error) {
-			c.server.Aggregator.Lock()
-			defer c.server.Aggregator.Unlock()
 			return fmt.Sprintln(c.server.Aggregator.Sets), nil
 		},
 		"delcounters": func(args []string) (string, error) {
@@ -119,8 +109,6 @@ func (c *consoleConn) serve() {
 }
 
 func (c *consoleConn) delete(keys []string, metrics types.AggregatedMetrics) int {
-	c.server.Aggregator.Lock()
-	defer c.server.Aggregator.Unlock()
 	i := 0
 	for _, k := range keys {
 		metrics.Delete(k)

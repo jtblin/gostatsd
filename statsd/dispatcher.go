@@ -1,20 +1,21 @@
 package statsd
 
 import (
-	"time"
-	"sync"
 	"hash/adler32"
+	"sync"
+	"sync/atomic"
+	"time"
 
-	"github.com/jtblin/gostatsd/types"
 	"github.com/jtblin/gostatsd/backend"
+	"github.com/jtblin/gostatsd/types"
 
 	log "github.com/Sirupsen/logrus"
 	"golang.org/x/net/context"
 )
 
 type Dispatcher interface {
-	Run() error
-	DispatchMetric(ctx context.Context, m *types.Metric)
+	Run(context.Context) error
+	DispatchMetric(context.Context, *types.Metric)
 }
 
 type Aggregator interface {
@@ -27,26 +28,41 @@ type AggregatorFactory interface {
 	Create() Aggregator
 }
 
+// The HandlerFunc type is an adapter to allow the use of ordinary functions as metric handlers.
+type AggregatorFactoryFunc func() Aggregator
+
+// HandleMetric calls f(m).
+func (f AggregatorFactoryFunc) Create() {
+	return f()
+}
+
+type flushCommand struct {
+	context.Context
+	result chan<- *types.MetricMap
+}
+
 type worker struct {
-	metrics chan *types.Metric
-	commands chan struct{}
-	aggr Aggregator
+	metrics   chan *types.Metric
+	flushChan chan *flushCommand
+	aggr      Aggregator
 }
 
 type stats struct {
-	LastFlush         time.Time          // Last time the metrics where aggregated
-	LastFlushError time.Time
+	lastFlush      atomic.Value // time.Time; Last time the metrics where aggregated
+	lastFlushError atomic.Value // time.Time
 }
 
 type dispatcher struct {
-	flushInterval time.Duration      // How often to flush metrics to the sender
+	flushInterval    time.Duration // How often to flush metrics to the sender
+	lastFlushTimeout time.Duration // Timeout of the flush operation, performed before termination
 	//af AggregatorFactory		// Factory of Aggregator objects
 	senders []backend.MetricSender // Senders to which metrics are flushed
-	workers map[uint16]*worker
+	workers map[int]*worker
+	stats
 }
 
-func NewDispatcher(numWorkers uint16, perWorkerBufferSize uint32, flushInterval time.Duration, af AggregatorFactory, senders []backend.MetricSender) Dispatcher {
-	workers := make(map[uint16]*worker)
+func NewDispatcher(numWorkers int, perWorkerBufferSize int, flushInterval time.Duration, af AggregatorFactory, senders []backend.MetricSender) Dispatcher {
+	workers := make(map[int]*worker)
 
 	for i := 0; i < numWorkers; i++ {
 		workers[i] = &worker{
@@ -65,15 +81,16 @@ func NewDispatcher(numWorkers uint16, perWorkerBufferSize uint32, flushInterval 
 
 func (d *dispatcher) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
-	wg.Add(len(d.workers))
+	wg.Add(len(d.workers) + 1)
 	for _, worker := range d.workers {
 		go worker.work(wg)
 	}
+	go d.flushPeriodically(ctx, wg)
 	defer func() {
 		for _, channel := range d.workers {
 			close(channel) // Close channel to terminate worker
 		}
-		wg.Wait() // Wait for all workers to finish
+		wg.Wait() // Wait for all workers and flusher to finish
 	}()
 
 	// Work until asked to stop
@@ -81,52 +98,126 @@ func (d *dispatcher) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func (d *dispatcher) DispatchMetric(ctx context.Context, m *types.Metric) {
+func (d *dispatcher) DispatchMetric(ctx context.Context, m *types.Metric) error {
 	hash := adler32.Checksum([]byte(m.Name))
-	channel := d.workers[hash % len(d.workers)]
+	channel := d.workers[hash%len(d.workers)]
 	select {
+	case <-ctx.Done():
+		return ctx.Err()
 	case channel <- m:
 		return nil
-	case <- ctx.Done():
-		return ctx.Err()
+	}
+}
+
+func (d *dispatcher) flushPeriodically(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
+	flushFinished := make(chan struct{}, 1)
+	flushTimer := time.NewTimer(d.flushInterval)
+	var flushCancel context.CancelFunc
+	for {
+		select {
+		case <-ctx.Done():
+			flushTimer.Stop()
+			d.doLastFlush(flushCancel, flushFinished)
+			return
+		case <-flushTimer.C: // Time to flush to the backends
+			var flushCtx context.Context
+			flushCtx, flushCancel = context.WithCancel(context.Background())
+			go func(cancel context.CancelFunc) {
+				defer func() {
+					flushFinished <- struct{}{}
+				}()
+				defer cancel()
+				d.flushData(flushCtx)
+			}(flushCancel)
+		case <-flushFinished:
+			flushCancel = nil
+			flushTimer = time.NewTimer(d.flushInterval)
+		}
+	}
+}
+
+func (d *dispatcher) doLastFlush(flushCancel context.CancelFunc, flushFinished chan struct{}) {
+	if flushCancel == nil {
+		// Flush is not in flight
+		lastCtx, cancelFunc := context.WithTimeout(context.Background(), d.lastFlushTimeout)
+		defer cancelFunc()
+		d.flushData(lastCtx)
+	} else {
+		// Flush is in flight
+		flushTimeout := time.NewTimer(d.lastFlushTimeout)
+		select {
+		case <-flushFinished: // Flush finished before timeout
+		case <-flushTimeout.C: // Flush has not finished in time
+			flushCancel()   // Cancelling flush
+			<-flushFinished // Waiting for flush to finish
+		}
+	}
+}
+
+func (d *dispatcher) flushData(ctx context.Context) {
+	results := make(chan *types.MetricMap, len(d.workers)) // Enough capacity not to block workers
+	cmd := &flushCommand{ctx, results}
+	for _, worker := range d.workers {
+		select {
+		case <-ctx.Done():
+			return
+		case worker.flushChan <- cmd:
+		}
+	}
+	for r := len(d.workers); r > 0; r-- {
+		select {
+		case <-ctx.Done():
+			return
+		case result := <-results:
+			d.sendFlushedData(ctx, result)
+		}
+	}
+}
+
+func (d *dispatcher) sendFlushedData(ctx context.Context, metrics *types.MetricMap) {
+	var wg sync.WaitGroup
+	wg.Add(len(d.senders))
+	for _, sender := range d.senders {
+		go func(s backend.MetricSender) {
+			defer wg.Done()
+			log.Debugf("Sending metrics to backend %s", s.BackendName())
+			//TODO pass ctx
+			d.handleSendResult(s.SendMetrics(metrics))
+		}(sender)
+	}
+	wg.Wait()
+}
+
+func (d *dispatcher) handleSendResult(flushResult error) {
+	if flushResult != nil {
+		log.Errorf("Sending metrics to backend failed: %v", flushResult)
+		d.stats.lastFlushError.Store(time.Now())
+	} else {
+		d.stats.lastFlush.Store(time.Now())
 	}
 }
 
 func (d *worker) work(wg *sync.WaitGroup) {
 	defer wg.Done()
-	flushTimer := time.NewTimer(d.flushInterval)
 
 	for {
 		select {
-		case metric, ok := <-channel:
+		case metric, ok := <-d.metrics:
 			if ok {
-				aggr.ReceiveMetric(metric, time.Now())
+				d.aggr.ReceiveMetric(metric, time.Now())
 			} else {
-				log.Debug("Aggregator metrics queue was closed, exiting")
+				log.Debug("Worker metrics queue was closed, exiting")
 				// TODO flush metrics
 				return
 			}
-		case <-flushTimer.C: // Time to flush to the backends
-			flushed := aggr.Flush(time.Now) // pass func for stubbing
-			aggr.Reset(time.Now())
-			for _, sender := range a.Senders {
-				go func(s backend.MetricSender) {
-					log.Debugf("Sending metrics to backend %s", s.BackendName())
-					a.handleFlushResult(s.SendMetrics(flushed))
-				}(sender)
+		case cmd := <-d.flushChan:
+			flushed := d.aggr.Flush(time.Now) // pass func for stubbing
+			d.aggr.Reset(time.Now())
+			select {
+			case <-cmd.Context.Done():
+			case cmd.result <- flushed:
 			}
-			flushTimer = time.NewTimer(a.FlushInterval)
 		}
-	}
-}
-
-func handleFlushResult(a *MetricAggregator, flushResult error) {
-	//a.Lock()
-	//defer a.Unlock()
-	if flushResult != nil {
-		log.Errorf("Sending metrics to backend failed: %v", flushResult)
-		a.Stats.LastFlushError = time.Now()
-	} else {
-		a.Stats.LastFlush = time.Now()
 	}
 }

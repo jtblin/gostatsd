@@ -27,9 +27,9 @@ type metricAggregatorStats struct {
 //
 // Incoming metrics should be sent to the MetricQueue channel.
 type MetricAggregator struct {
-	ExpiryInterval    time.Duration      // How often to expire metrics
-	FlushInterval     time.Duration      // How often to flush metrics to the sender
-	LastFlush         time.Time          // Last time the metrics where aggregated
+	ExpiryInterval    time.Duration // How often to expire metrics
+	FlushInterval     time.Duration // How often to flush metrics to the sender
+	LastFlush         time.Time     // Last time the metrics where aggregated
 	PercentThresholds []float64
 	Senders           []backend.MetricSender // The sender to which metrics are flushed
 	Stats             metricAggregatorStats
