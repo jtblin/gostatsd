@@ -67,8 +67,7 @@ func (c *consoleConn) serve() {
 					"Last error from backends: %s\n",
 				c.server.Aggregator.Stats.BadLines,
 				c.server.Aggregator.Stats.LastMessage,
-				c.server.Aggregator.Stats.LastFlush,
-				c.server.Aggregator.Stats.LastFlushError), nil
+				c.server.Aggregator.Stats.LastFlush), nil //c.server.Aggregator.Stats.LastFlushError
 		},
 		"counters": func(args []string) (string, error) {
 			return fmt.Sprintln(c.server.Aggregator.Counters), nil

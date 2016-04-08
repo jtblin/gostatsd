@@ -13,7 +13,6 @@ import (
 	_ "github.com/jtblin/gostatsd/backend/backends" // import backends for initialisation
 	"github.com/jtblin/gostatsd/cloudprovider"
 	_ "github.com/jtblin/gostatsd/cloudprovider/providers" // import cloud providers for initialisation
-	"github.com/jtblin/gostatsd/types"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/spf13/pflag"
@@ -44,7 +43,8 @@ const (
 	// DefaultMetricsAddr is the default address on which to listen for metrics.
 	DefaultMetricsAddr = ":8125"
 	// DefaultMaxQueueSize is the default maximum number of buffered metrics per worker.
-	DefaultMaxQueueSize = 10000 // arbitrary
+	DefaultMaxQueueSize     = 10000 // arbitrary
+	defaultLastFlushTimeout = 2 * time.Second
 )
 
 const (
@@ -161,17 +161,17 @@ func (s *Server) Run(ctx context.Context) error {
 	factory := func() Aggregator {
 		return NewMetricAggregator(percentThresholds, s.FlushInterval, s.ExpiryInterval, s.DefaultTags)
 	}
-	dispatcher := NewDispatcher(s.MaxWorkers, s.MaxQueueSize, s.FlushInterval, AggregatorFactoryFunc(factory), backends)
+	dispatcher := NewDispatcher(s.MaxWorkers, s.MaxQueueSize, defaultLastFlushTimeout, s.FlushInterval, AggregatorFactoryFunc(factory), backends)
 
 	var wgDispatcher sync.WaitGroup
-	defer wgDispatcher.Wait() // Wait for dispatcher to shutdown
+	defer wgDispatcher.Wait()                                       // Wait for dispatcher to shutdown
 	ctxDisp, cancelDisp := context.WithCancel(context.Background()) // Separate context!
-	defer cancelDisp() // Tell the dispatcher to shutdown
+	defer cancelDisp()                                              // Tell the dispatcher to shutdown
 	wgDispatcher.Add(1)
 	go func() {
 		defer wgDispatcher.Done()
 		if err := dispatcher.Run(ctxDisp); err != nil && err != context.Canceled {
-			log.Panicf("Dispatcher unexpectedly quit: %v", err)
+			log.Panicf("Dispatcher quit unexpectedly: %v", err)
 		}
 	}()
 	var wgReceiver sync.WaitGroup
@@ -194,19 +194,21 @@ func (s *Server) Run(ctx context.Context) error {
 	for r := 0; r < s.MaxReaders; r++ {
 		go func() {
 			defer wgReceiver.Done()
-			receiver.Receive(ctx, c)
+			if err := receiver.Receive(ctx, c); err != nil && err != context.Canceled {
+				log.Errorf("Received exited with error: %v", err)
+			}
 		}()
 	}
 
 	// Start the console(s)
-	if s.ConsoleAddr != "" {
-		console := ConsoleServer{s.ConsoleAddr, aggregator}
-		go console.ListenAndServe()
-	}
-	if s.WebConsoleAddr != "" {
-		console := WebConsoleServer{s.WebConsoleAddr, aggregator}
-		go console.ListenAndServe()
-	}
+	//if s.ConsoleAddr != "" {
+	//	console := ConsoleServer{s.ConsoleAddr, aggregator}
+	//	go console.ListenAndServe()
+	//}
+	//if s.WebConsoleAddr != "" {
+	//	console := WebConsoleServer{s.WebConsoleAddr, aggregator}
+	//	go console.ListenAndServe()
+	//}
 
 	// Listen until done
 	<-ctx.Done()

@@ -18,15 +18,15 @@ const packetSizeUDP = 1500
 
 // Handler interface can be used to handle metrics for a MetricReceiver.
 type Handler interface {
-	HandleMetric(ctx context.Context, m *types.Metric)
+	HandleMetric(ctx context.Context, m *types.Metric) error
 }
 
 // The HandlerFunc type is an adapter to allow the use of ordinary functions as metric handlers.
-type HandlerFunc func(context.Context, *types.Metric)
+type HandlerFunc func(context.Context, *types.Metric) error
 
 // HandleMetric calls f(m).
-func (f HandlerFunc) HandleMetric(ctx context.Context, m *types.Metric) {
-	f(ctx, m)
+func (f HandlerFunc) HandleMetric(ctx context.Context, m *types.Metric) error {
+	return f(ctx, m)
 }
 
 // MetricReceiver receives data on its listening port and converts lines in to Metrics.
@@ -49,12 +49,12 @@ func NewMetricReceiver(ns string, tags []string, cloud cloudprovider.Interface, 
 }
 
 // increment allows counting server stats using default tags.
-func (mr *MetricReceiver) increment(ctx context.Context, name string, value int) {
-	mr.Handler.HandleMetric(ctx, types.NewMetric(internalStatName(name), float64(value), types.COUNTER, mr.Tags))
+func (mr *MetricReceiver) increment(ctx context.Context, name string, value int) error {
+	return mr.Handler.HandleMetric(ctx, types.NewMetric(internalStatName(name), float64(value), types.COUNTER, mr.Tags))
 }
 
 // Receive accepts incoming datagrams on c and calls mr.handleMessage() for each message.
-func (mr *MetricReceiver) Receive(ctx context.Context, c net.PacketConn) {
+func (mr *MetricReceiver) Receive(ctx context.Context, c net.PacketConn) error {
 	buf := make([]byte, packetSizeUDP)
 	for {
 		// This will error out when the socket is closed.
@@ -64,21 +64,33 @@ func (mr *MetricReceiver) Receive(ctx context.Context, c net.PacketConn) {
 				select {
 				case <-ctx.Done():
 				default:
-					log.Errorf("Non-temporary error reading from socket: %v", err)
+					return fmt.Errorf("Non-temporary error reading from socket: %v", err)
 				}
-				return
+				return nil
 			}
 			log.Warnf("Error reading from socket: %v", err)
 			continue
 		}
-		mr.increment(ctx, "packets_received", 1)
-		mr.handleMessage(ctx, addr, buf[:nbytes])
+		if err := mr.increment(ctx, "packets_received", 1); err != nil {
+			if err == context.Canceled {
+				return err
+			} else {
+				log.Warnf("Failed to increment metric: %v", err)
+			}
+		}
+		if err := mr.handleMessage(ctx, addr, buf[:nbytes]); err != nil {
+			if err == context.Canceled {
+				return err
+			} else {
+				log.Warnf("Failed to handle message: %v", err)
+			}
+		}
 	}
 }
 
 // handleMessage handles the contents of a datagram and call r.Handler.HandleMetric()
 // for each line that successfully parses in to a types.Metric.
-func (mr *MetricReceiver) handleMessage(ctx context.Context, addr net.Addr, msg []byte) {
+func (mr *MetricReceiver) handleMessage(ctx context.Context, addr net.Addr, msg []byte) error {
 	numMetrics := 0
 	var triedToGetTags bool
 	var additionalTags types.Tags
@@ -88,8 +100,7 @@ func (mr *MetricReceiver) handleMessage(ctx context.Context, addr net.Addr, msg 
 
 		// protocol does not require line to end in \n, if EOF use received line if valid
 		if readerr != nil && readerr != io.EOF {
-			log.Warnf("Error reading message from %s: %v", addr, readerr)
-			return
+			return fmt.Errorf("Error reading message from %s: %v", addr, readerr)
 		} else if readerr != io.EOF {
 			// remove newline, only if not EOF
 			if len(line) > 0 {
@@ -103,7 +114,9 @@ func (mr *MetricReceiver) handleMessage(ctx context.Context, addr net.Addr, msg 
 				// logging as debug to avoid spamming logs when a bad actor sends
 				// badly formatted messages
 				log.Debugf("Error parsing line %q from %s: %v", line, addr, err)
-				mr.increment(ctx, "bad_lines_seen", 1)
+				if err := mr.increment(ctx, "bad_lines_seen", 1); err != nil {
+					return err
+				}
 				continue
 			}
 			if !triedToGetTags {
@@ -114,14 +127,15 @@ func (mr *MetricReceiver) handleMessage(ctx context.Context, addr net.Addr, msg 
 				metric.Tags = append(metric.Tags, additionalTags...)
 				log.Debugf("Metric tags: %v", metric.Tags)
 			}
-			mr.Handler.HandleMetric(ctx, metric)
+			if err := mr.Handler.HandleMetric(ctx, metric); err != nil {
+				return err
+			}
 			numMetrics++
 		}
 
 		if readerr == io.EOF {
 			// if was EOF, finished handling
-			mr.increment(ctx, "metrics_received", numMetrics)
-			return
+			return mr.increment(ctx, "metrics_received", numMetrics)
 		}
 	}
 }

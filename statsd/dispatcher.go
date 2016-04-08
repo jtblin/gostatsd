@@ -15,7 +15,7 @@ import (
 
 type Dispatcher interface {
 	Run(context.Context) error
-	DispatchMetric(context.Context, *types.Metric)
+	DispatchMetric(context.Context, *types.Metric) error
 }
 
 type Aggregator interface {
@@ -24,6 +24,7 @@ type Aggregator interface {
 	Reset(time.Time)
 }
 
+// AggregatorFactory creates Aggregator objects.
 type AggregatorFactory interface {
 	Create() Aggregator
 }
@@ -32,7 +33,7 @@ type AggregatorFactory interface {
 type AggregatorFactoryFunc func() Aggregator
 
 // HandleMetric calls f(m).
-func (f AggregatorFactoryFunc) Create() {
+func (f AggregatorFactoryFunc) Create() Aggregator {
 	return f()
 }
 
@@ -49,33 +50,35 @@ type worker struct {
 
 type stats struct {
 	lastFlush      atomic.Value // time.Time; Last time the metrics where aggregated
-	lastFlushError atomic.Value // time.Time
+	lastFlushError atomic.Value // time.Time; Time of the last flush error
 }
 
 type dispatcher struct {
-	flushInterval    time.Duration // How often to flush metrics to the sender
-	lastFlushTimeout time.Duration // Timeout of the flush operation, performed before termination
-	//af AggregatorFactory		// Factory of Aggregator objects
-	senders []backend.MetricSender // Senders to which metrics are flushed
-	workers map[int]*worker
+	flushInterval    time.Duration          // How often to flush metrics to the sender
+	lastFlushTimeout time.Duration          // Timeout of the flush operation, performed before termination
+	senders          []backend.MetricSender // Senders to which metrics are flushed
+	workers          map[uint16]*worker
 	stats
 }
 
-func NewDispatcher(numWorkers int, perWorkerBufferSize int, flushInterval time.Duration, af AggregatorFactory, senders []backend.MetricSender) Dispatcher {
-	workers := make(map[int]*worker)
+func NewDispatcher(numWorkers int, perWorkerBufferSize int, flushInterval, lastFlushTimeout time.Duration, af AggregatorFactory, senders []backend.MetricSender) Dispatcher {
+	workers := make(map[uint16]*worker)
 
-	for i := 0; i < numWorkers; i++ {
+	n := uint16(numWorkers)
+
+	for i := uint16(0); i < n; i++ {
 		workers[i] = &worker{
 			make(chan *types.Metric, perWorkerBufferSize),
-			make(chan struct{}),
+			make(chan *flushCommand),
 			af.Create(),
 		}
 	}
 	return &dispatcher{
 		flushInterval,
-		af,
+		lastFlushTimeout,
 		senders,
 		workers,
+		stats{},
 	}
 }
 
@@ -83,12 +86,12 @@ func (d *dispatcher) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	wg.Add(len(d.workers) + 1)
 	for _, worker := range d.workers {
-		go worker.work(wg)
+		go worker.work(&wg)
 	}
-	go d.flushPeriodically(ctx, wg)
+	go d.flushPeriodically(ctx, &wg)
 	defer func() {
-		for _, channel := range d.workers {
-			close(channel) // Close channel to terminate worker
+		for _, worker := range d.workers {
+			close(worker.metrics) // Close channel to terminate worker
 		}
 		wg.Wait() // Wait for all workers and flusher to finish
 	}()
@@ -100,11 +103,11 @@ func (d *dispatcher) Run(ctx context.Context) error {
 
 func (d *dispatcher) DispatchMetric(ctx context.Context, m *types.Metric) error {
 	hash := adler32.Checksum([]byte(m.Name))
-	channel := d.workers[hash%len(d.workers)]
+	worker := d.workers[uint16(hash%uint32(len(d.workers)))]
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case channel <- m:
+	case worker.metrics <- m:
 		return nil
 	}
 }
@@ -183,7 +186,7 @@ func (d *dispatcher) sendFlushedData(ctx context.Context, metrics *types.MetricM
 			defer wg.Done()
 			log.Debugf("Sending metrics to backend %s", s.BackendName())
 			//TODO pass ctx
-			d.handleSendResult(s.SendMetrics(metrics))
+			d.handleSendResult(s.SendMetrics(*metrics))
 		}(sender)
 	}
 	wg.Wait()
